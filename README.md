@@ -1,19 +1,21 @@
 # sktrace
 
-基于 Frida Stalker 的 Android 原生指令跟踪工具。目标函数进入后，`sktrace` 会记录当前线程在目标模块内执行过的指令和寄存器变化，并在函数返回时输出统计结果。
+[English](README.md) | [中文](README.zh-CN.md)
 
-## 支持
+An Android native instruction tracer built on Frida Stalker. When the target function is called, `sktrace` follows the current thread, records instructions executed inside the target module and register changes, then prints statistics when the function returns.
 
-- Android ARM32、Thumb 和 ARM64
-- 按导出符号或模块内偏移定位函数
-- USB 设备或远程 `frida-server`
-- 指令长度、助记符、操作数和寄存器变化统计
+## Support
 
-ARM64 设备保留 32 位 ABI 支持时，也可以跟踪 32 位 App。当前仅支持 attach 模式，不支持 x86、x86_64 和 MIPS。
+- Android ARM32, Thumb, and ARM64
+- Functions selected by exported symbol or module-relative offset
+- USB devices and remote `frida-server` connections
+- Instruction length, mnemonic, operands, and register change statistics
 
-## 使用
+An ARM64 device with 32-bit ABI support can also trace 32-bit apps. Only attach mode is available. x86, x86_64, and MIPS are not supported.
 
-需要 Python 3、Frida Python binding，以及设备端可用的 `frida-server` 或 Frida Gadget。客户端与设备端的 Frida 版本需要一致。
+## Usage
+
+You need Python 3, the Frida Python bindings, and a working `frida-server` or Frida Gadget on the device. The client and device must use the same Frida version.
 
 ```bash
 git clone https://github.com/vw2x/c-sktrace.git
@@ -21,7 +23,7 @@ cd c-sktrace
 python3 -m pip install frida
 ```
 
-目标进程需要已经运行，并且目标原生库已经加载。按导出符号跟踪：
+The target process must be running with the native library already loaded. Trace an exported symbol:
 
 ```bash
 python3 sktrace/sktrace.py \
@@ -32,7 +34,7 @@ python3 sktrace/sktrace.py \
   com.example.app
 ```
 
-`-i` 也可以传入以 `0x` 开头的模块内偏移：
+`-i` also accepts a module-relative offset beginning with `0x`:
 
 ```bash
 python3 sktrace/sktrace.py \
@@ -43,7 +45,7 @@ python3 sktrace/sktrace.py \
   com.example.app
 ```
 
-连接远程 `frida-server` 时，用 `-H` 替换 `-U`：
+For a remote `frida-server`, replace `-U` with `-H`:
 
 ```bash
 python3 sktrace/sktrace.py \
@@ -54,4 +56,4 @@ python3 sktrace/sktrace.py \
   com.example.app
 ```
 
-`-p` 和 `-a` 可以在主跟踪脚本前后加载自定义 Frida 脚本。按回车或 `Ctrl+C` 结束会话。
+Use `-p` and `-a` to load custom Frida scripts before or after the main tracer. Press Enter or `Ctrl+C` to end the session.

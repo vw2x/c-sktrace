@@ -1,35 +1,23 @@
 
 
-const arm64CM = new CModule(`
+if (Process.arch !== 'arm' && Process.arch !== 'arm64') {
+    throw new Error(`Unsupported architecture: ${Process.arch}. Expected arm or arm64.`);
+}
+
+const traceCM = new CModule(`
 #include <gum/gumstalker.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 
 extern void on_message(const gchar *message);
-extern void on_register_change(gpointer addr, int reg_idx, guint64 old_val, guint64 new_val);
 static void log(const gchar *format, ...);
-static void on_arm64_before(GumCpuContext *cpu_context, gpointer user_data);
-static void on_arm64_after(GumCpuContext *cpu_context, gpointer user_data);
+static void on_trace_after(GumCpuContext *cpu_context, gpointer user_data);
 void flush_buffer();  // Export for JS
 
 void hello() {
     on_message("Hello form CModule");
 }
-
-// 使用 shared_mem 保存寄存器状态
-#define SHARED_MEM_SIZE 64
-static guint64 shared_mem[SHARED_MEM_SIZE];
-
-gpointer 
-get_shared_mem() 
-{
-    return shared_mem;
-}
-
-// 寄存器索引定义
-#define IDX_BEFORE_X0 0
-#define IDX_BEFORE_SP 1
 
 static void
 log(const gchar *format, ...)
@@ -59,52 +47,40 @@ void transform(GumStalkerIterator *iterator,
 {
     cs_insn *insn;
 
-    gpointer base = *(gpointer*)user_data;
-    gpointer end = *(gpointer*)(user_data + sizeof(gpointer));
+    gpointer base = *(gpointer *) user_data;
+    gpointer end = *(gpointer *) ((guint8 *) user_data + sizeof(gpointer));
     
     while (gum_stalker_iterator_next(iterator, &insn))
     {
-        gboolean in_target = (gpointer)insn->address >= base && (gpointer)insn->address < end;
+        gsize insn_address = (gsize) insn->address;
+        gpointer insn_data = GSIZE_TO_POINTER(insn_address);
+        gboolean in_target = insn_address >= GPOINTER_TO_SIZE(base) &&
+            insn_address < GPOINTER_TO_SIZE(end);
         if(in_target)
         {
-            // 输出指令信息 (使用 tab 分隔)
-            log("%p\t%s\t%s", (gpointer)insn->address, insn->mnemonic, insn->op_str);
-            gum_stalker_iterator_put_callout(iterator, on_arm64_before, (gpointer) insn->address, NULL);
+            // Include Capstone's size so Thumb instructions keep their 2/4-byte width.
+            log("%p\t%u\t%s\t%s", insn_data, insn->size,
+                insn->mnemonic, insn->op_str);
         }
         gum_stalker_iterator_keep(iterator);
         if(in_target) 
         {
-            gum_stalker_iterator_put_callout(iterator, on_arm64_after, (gpointer) insn->address, NULL);
+            gum_stalker_iterator_put_callout(iterator, on_trace_after,
+                insn_data, NULL);
         }
     }
 }
 
-
-const gchar * cpu_format = "
-    0x%x\t0x%x\t0x%x\t0x%x\t0x%x
-    \t0x%x\t0x%x\t0x%x\t0x%x\t0x%x
-    \t0x%x\t0x%x\t0x%x\t0x%x\t0x%x
-    \t0x%x\t0x%x\t0x%x\t0x%x\t0x%x
-    \t0x%x\t0x%x\t0x%x\t0x%x\t0x%x
-    \t0x%x\t0x%x\t0x%x\t0x%x\t0x%x
-    \t0x%x\t0x%x\t0x%x
-    ";
-
 static void
-on_arm64_before(GumCpuContext *cpu_context,
+on_trace_after(GumCpuContext *cpu_context,
         gpointer user_data)
 {
-    // 空 - 不做 before 快照
-}
+    if (cpu_context == NULL)
+        return;
 
-static void
-on_arm64_after(GumCpuContext *cpu_context,
-        gpointer user_data)
-{
-    // 输出所有寄存器，Python 端做比较
-    // 格式: addr|x0|x1|x2|...|x28|fp|lr|sp|pc
-    if (cpu_context) {
-        log("%p|%llx|%llx|%llx|%llx|%llx|%llx|%llx|%llx|%llx|%llx|"
+#if defined (HAVE_ARM64)
+    // addr|arm64|x0|...|x28|fp|lr|sp|pc
+    log("%p|arm64|%llx|%llx|%llx|%llx|%llx|%llx|%llx|%llx|%llx|%llx|"
             "%llx|%llx|%llx|%llx|%llx|%llx|%llx|%llx|%llx|%llx|"
             "%llx|%llx|%llx|%llx|%llx|%llx|%llx|%llx|%llx|"
             "%llx|%llx|%llx|%llx",
@@ -118,7 +94,19 @@ on_arm64_after(GumCpuContext *cpu_context,
             cpu_context->x[24], cpu_context->x[25], cpu_context->x[26], cpu_context->x[27],
             cpu_context->x[28],
             cpu_context->fp, cpu_context->lr, cpu_context->sp, cpu_context->pc);
-    }
+#elif defined (HAVE_ARM)
+    // addr|arm|r0|...|r12|sp|lr|pc|cpsr
+    log("%p|arm|%x|%x|%x|%x|%x|%x|%x|%x|%x|%x|%x|%x|%x|%x|%x|%x|%x",
+        user_data,
+        cpu_context->r[0], cpu_context->r[1], cpu_context->r[2],
+        cpu_context->r[3], cpu_context->r[4], cpu_context->r[5],
+        cpu_context->r[6], cpu_context->r[7], cpu_context->r8,
+        cpu_context->r9, cpu_context->r10, cpu_context->r11,
+        cpu_context->r12, cpu_context->sp, cpu_context->lr,
+        cpu_context->pc, cpu_context->cpsr);
+#else
+# error Unsupported architecture
+#endif
 }
 
 `, {
@@ -130,34 +118,7 @@ on_arm64_after(GumCpuContext *cpu_context,
             tid: currentTid,
             message: message
         });
-      }, 'void', ['pointer']),
-    on_register_change: new NativeCallback((addr, reg_idx, old_val, new_val) => {
-        // C 调用这个回调发送寄存器变化
-        try {
-            if (!currentTid) return;
-            
-            // 构造寄存器名
-            const regNames = [
-                'x0', 'x1', 'x2', 'x3', 'x4', 'x5', 'x6', 'x7', 'x8', 'x9',
-                'x10', 'x11', 'x12', 'x13', 'x14', 'x15', 'x16', 'x17', 'x18', 'x19',
-                'x20', 'x21', 'x22', 'x23', 'x24', 'x25', 'x26', 'x27', 'x28',
-                'fp', 'lr', 'sp', 'pc'
-            ];
-            const regName = regNames[reg_idx] || `reg${reg_idx}`;
-            
-            // 发送格式化消息给 Python
-            send({
-                type: 'c_reg_change',
-                tid: currentTid,
-                addr: addr.toString(),
-                reg: regName,
-                old: '0x' + old_val.toString(16),
-                new: '0x' + new_val.toString(16)
-            });
-        } catch (e) {
-            console.error('[on_register_change] Error:', e.message);
-        }
-      }, 'void', ['pointer', 'int', 'uint64', 'uint64']),
+      }, 'void', ['pointer'])
 });
 
 let currentTid = null;  // 全局变量保存当前 tid
@@ -171,14 +132,14 @@ function stalkerTraceRangeC(tid, base, size) {
     userData.add(pointerSize).writePointer(base.add(size))
     
     Stalker.follow(tid, {
-        transform: arm64CM.transform,
+        transform: traceCM.transform,
         data: userData
     })
 }
 
 // 导出 C 的 flush 函数，让 JS 可以调用
 function flushCBuffer(tid) {
-    const flushBuffer = new NativeFunction(arm64CM.flush_buffer, 'void', []);
+    const flushBuffer = new NativeFunction(traceCM.flush_buffer, 'void', []);
     flushBuffer();
 }
 

@@ -45,27 +45,28 @@ class Inst:
     def cal_regs_change(self, pre_ctx, ctx):
         print_every_change = True
         eveny_change_str = None
-        # ignore pc
-        if not pre_ctx:
-            for i in range(31):
-                self.changed_regs_dict["x"+str(i)] = [ctx.general_regs[i]]
-        else:
-            if pre_ctx.sp != ctx.sp:
-                if "sp" not in self.changed_regs_dict:
-                    self.changed_regs_dict["sp"] = []
-                self.changed_regs_dict["sp"].append(ctx.sp)
-                if print_every_change:
-                    eveny_change_str = ("{}\t; sp={}->{}".format(self.simple_str(), hex(pre_ctx.sp), hex(ctx.sp)))
-            for i in range(31):
-                if pre_ctx.general_regs[i] != ctx.general_regs[i]:
-                    if "x"+str(i) not in self.changed_regs_dict:
-                        self.changed_regs_dict["x"+str(i)] = []
-                    self.changed_regs_dict["x"+str(i)].append(ctx.general_regs[i])
-                    if print_every_change:
-                        if eveny_change_str:
-                            eveny_change_str += (", x{}={}->{}".format(str(i), hex(pre_ctx.general_regs[i]), hex(ctx.general_regs[i])))
-                        else:
-                            eveny_change_str = ("{}\t; x{}={}->{}".format(self.simple_str(), str(i), hex(pre_ctx.general_regs[i]), hex(ctx.general_regs[i])))
+        previous_regs = pre_ctx.registers if pre_ctx else {}
+
+        # PC identifies the instruction and is intentionally not part of the
+        # change summary. Register names come from the architecture-specific
+        # context, so this works for both ARM32 and ARM64.
+        for reg_name, new_value in ctx.registers.items():
+            old_value = previous_regs.get(reg_name)
+            if old_value == new_value:
+                continue
+
+            if reg_name not in self.changed_regs_dict:
+                self.changed_regs_dict[reg_name] = []
+            self.changed_regs_dict[reg_name].append(new_value)
+
+            if print_every_change and old_value is not None:
+                change = "{}={}->{}".format(
+                    reg_name, hex(old_value), hex(new_value))
+                if eveny_change_str:
+                    eveny_change_str += ", " + change
+                else:
+                    eveny_change_str = "{}\t; {}".format(
+                        self.simple_str(), change)
 
         if print_every_change and eveny_change_str:
             print(eveny_change_str)
@@ -125,42 +126,38 @@ class Inst:
         inst_line = "{}\t{}\t{}\t{}\t{}\t{}".format("instruction", self.addr, self.block, self.size, self.mnem, self.op)
         return inst_line
 
-class Arm64Ctx:
-        def __init__xxx(self, pc, sp, 
-                x0, x1, x2, x3, x4, x5, x6, x7, x8, x9,
-                x10, x11, x12, x13, x14, x15, x16, x17, x18, x19,
-                x20, x21, x22, x23, x24, x25, x26, x27, x28,
-                fp, lr
-                ):
-            self.pc = pc
-            self.sp = sp
-            self.general_regs = [int(x0,16), int(x1,16), int(x2,16), int(x3,16), int(x4,16), int(x5,16), int(x6,16), int(x7,16), int(x8,16), int(x9,16),
-                int(x10,16), int(x11,16), int(x12,16), int(x13,16), int(x14,16), int(x15,16), int(x16,16), int(x17,16), int(x18,16), int(x19,16),
-                int(x20,16), int(x21,16), int(x22,16), int(x23,16), int(x24,16), int(x25,16), int(x26,16), int(x27,16), int(x28,16),
-                int(fp,16), int(lr,16)]
-            self.fp = self.general_regs[29]
-            self.lr = self.general_regs[30]
-            self.changed_regs = []
+class CpuCtx:
+    def __init__(self, arch, pc, registers):
+        self.arch = arch
+        self.pc = pc
+        self.registers = registers
+        self.sp = registers["sp"]
+        self.general_regs = list(registers.values())
 
-        def __init__(self, pc, sp, 
-                x0, x1, x2, x3, x4, x5, x6, x7, x8, x9,
-                x10, x11, x12, x13, x14, x15, x16, x17, x18, x19,
-                x20, x21, x22, x23, x24, x25, x26, x27, x28,
-                fp, lr
-                ):
-            self.pc = pc
-            self.sp = sp
-            self.general_regs = [x0, x1, x2, x3, x4, x5, x6, x7, x8, x9,
-                                    x10, x11, x12, x13, x14, x15, x16, x17, x18, x19,
-                                    x20, x21, x22, x23, x24, x25, x26, x27, x28,
-                                    fp, lr]
-            self.fp = self.general_regs[29]
-            self.lr = self.general_regs[30]
-            self.changed_regs = []
-        
-        def __str__(self):
-            ctx_line = ",".join([hex(r) for r in self.general_regs])
-            return ctx_line
+    def __str__(self):
+        return ",".join(
+            "{}={}".format(name, hex(value))
+            for name, value in self.registers.items())
+
+
+class Arm64Ctx(CpuCtx):
+    def __init__(self, pc, sp, x_regs, fp, lr):
+        registers = {
+            "x{}".format(index): value
+            for index, value in enumerate(x_regs)
+        }
+        registers.update({"fp": fp, "lr": lr, "sp": sp})
+        super().__init__("arm64", pc, registers)
+
+
+class Arm32Ctx(CpuCtx):
+    def __init__(self, pc, sp, r_regs, lr, cpsr):
+        registers = {
+            "r{}".format(index): value
+            for index, value in enumerate(r_regs)
+        }
+        registers.update({"sp": sp, "lr": lr, "cpsr": cpsr})
+        super().__init__("arm", pc, registers)
 
 
 
@@ -188,17 +185,66 @@ class TraceMgr:
                 # 忽略没有 tid 的消息
                 return
             if tid not in self.tid_trace_dict:
-                self.tid_trace_dict[tid] = Arm64TraceLog(tid)
+                self.tid_trace_dict[tid] = TraceLog(tid)
     
             self.tid_trace_dict[tid].on_message(payload)
 
 
-class Arm64TraceLog:
+class TraceLog:
     def __init__(self, tid):
         self.tid = tid
         self.block_dict = {}
         self.inst_dict = {}
         self.pre_ctx = None
+
+    @staticmethod
+    def _as_int(value):
+        if isinstance(value, int):
+            return value
+        return int(value, 0)
+
+    @staticmethod
+    def _address_key(value):
+        if isinstance(value, int):
+            return hex(value)
+        return str(value)
+
+    def _record_context(self, addr, ctx):
+        addr = self._address_key(addr)
+        if addr not in self.inst_dict:
+            inst = Inst(addr, addr, 4, "unknown", "")
+            self.inst_dict[addr] = inst
+            if addr not in self.block_dict:
+                self.block_dict[addr] = Block(addr)
+            self.block_dict[addr].append_inst(inst)
+
+        self.inst_dict[addr].add_execed_ctx(ctx)
+        self.inst_dict[addr].cal_regs_change(self.pre_ctx, ctx)
+        self.pre_ctx = ctx
+
+    def _parse_c_context(self, parts):
+        addr = parts[0]
+
+        if len(parts) == 35 and parts[1] == "arm64":
+            x_regs = [int(value, 16) for value in parts[2:31]]
+            ctx = Arm64Ctx(
+                int(parts[34], 16), int(parts[33], 16), x_regs,
+                int(parts[31], 16), int(parts[32], 16))
+        elif len(parts) == 19 and parts[1] == "arm":
+            r_regs = [int(value, 16) for value in parts[2:15]]
+            ctx = Arm32Ctx(
+                int(parts[17], 16), int(parts[15], 16), r_regs,
+                int(parts[16], 16), int(parts[18], 16))
+        elif len(parts) == 34:
+            # Compatibility with logs emitted by the previous ARM64 CModule.
+            x_regs = [int(value, 16) for value in parts[1:30]]
+            ctx = Arm64Ctx(
+                int(parts[33], 16), int(parts[32], 16), x_regs,
+                int(parts[30], 16), int(parts[31], 16))
+        else:
+            raise ValueError("unsupported register record")
+
+        return addr, ctx
 
     def on_message(self, payload):
         # tid = payload['tid']
@@ -214,72 +260,60 @@ class Arm64TraceLog:
             # print(inst)
             pass
         elif type == 'ctx':
-            # print(payload)
-            val = json.loads(payload['val'])            
-            ctx = Arm64Ctx(val["pc"], val["sp"], 
-                val["x0"], val["x1"], val["x2"], val["x3"], val["x4"], val["x5"], val["x6"], val["x7"], val["x8"], val["x9"], 
-                val["x10"], val["x11"], val["x12"], val["x13"], val["x14"], val["x15"], val["x16"], val["x17"], val["x18"], val["x19"],
-                val["x20"], val["x21"], val["x22"], val["x23"], val["x24"], val["x25"], val["x26"], val["x27"], val["x28"], 
-                val["fp"], val["lr"])
-            if ctx.pc not in self.inst_dict:
-                raise Exception("No inst addr:{} maybe caused by Interceptor.payload:{}".format(ctx.pc, payload))
-            self.inst_dict[ctx.pc].add_execed_ctx(ctx)
-            self.inst_dict[ctx.pc].cal_regs_change(self.pre_ctx, ctx)
-            self.pre_ctx = ctx
-            pass
+            val = json.loads(payload['val'])
+            pc = self._as_int(val["pc"])
+            sp = self._as_int(val["sp"])
+
+            if "x0" in val:
+                x_regs = [self._as_int(val["x{}".format(index)])
+                          for index in range(29)]
+                ctx = Arm64Ctx(
+                    pc, sp, x_regs, self._as_int(val["fp"]),
+                    self._as_int(val["lr"]))
+            elif "r0" in val:
+                r_regs = [self._as_int(val["r{}".format(index)])
+                          for index in range(13)]
+                ctx = Arm32Ctx(
+                    pc, sp, r_regs, self._as_int(val["lr"]),
+                    self._as_int(val["cpsr"]))
+            else:
+                raise ValueError("Unsupported CPU context: {}".format(val))
+
+            self._record_context(pc, ctx)
         elif type == 'c_output':
             # 处理 C 版本输出
             message = payload['message']
             
-            # 区分两种格式:
-            # 1. 指令信息: addr\tmnemonic\top_str (tab 分隔, 3个字段)
-            # 2. 寄存器信息: addr|x0|x1|...|sp|pc (管道分隔, 34个字段)
+            # Two formats are emitted by the CModule:
+            # 1. addr\tsize\tmnemonic\top_str
+            # 2. architecture-tagged register records separated by pipes.
             
             if '|' in message:
-                # 寄存器信息
-                parts = message.split('|')
-                if len(parts) == 34:
-                    try:
-                        # 解析字段
-                        addr = parts[0]  # 指令地址
-                        x_regs = [int(parts[i], 16) for i in range(1, 30)]  # x0-x28
-                        fp = int(parts[30], 16)
-                        lr = int(parts[31], 16)
-                        sp = int(parts[32], 16)
-                        pc = int(parts[33], 16)
-                        
-                        # 创建 Arm64Ctx 对象
-                        ctx = Arm64Ctx(pc, sp, *x_regs, fp, lr)
-                        
-                        # 如果指令不存在，创建一个临时的
-                        if addr not in self.inst_dict:
-                            # 创建临时指令对象 (后续会被 transform 的输出替换)
-                            inst = Inst(addr, addr, 4, "unknown", "")
-                            self.inst_dict[addr] = inst
-                            if addr not in self.block_dict:
-                                self.block_dict[addr] = Block(addr)
-                            self.block_dict[addr].append_inst(inst)
-                        
-                        self.inst_dict[addr].add_execed_ctx(ctx)
-                        self.inst_dict[addr].cal_regs_change(self.pre_ctx, ctx)
-                        self.pre_ctx = ctx
-                    except Exception as e:
-                        print(f"Error parsing c_output register: {e}, message: {message}")
+                try:
+                    addr, ctx = self._parse_c_context(message.split('|'))
+                    self._record_context(addr, ctx)
+                except Exception as e:
+                    print(f"Error parsing c_output register: {e}, message: {message}")
             elif '\t' in message:
-                # 指令信息
                 parts = message.split('\t')
-                if len(parts) == 3:
+                if len(parts) in (3, 4):
                     try:
                         addr = parts[0]
-                        mnem = parts[1]
-                        op = parts[2]
-                        
-                        # 创建指令对象
-                        inst = Inst(addr, addr, 4, mnem, op)  # 假设 ARM64 指令 size=4
+                        if len(parts) == 4:
+                            size = int(parts[1], 10)
+                            mnem = parts[2]
+                            op = parts[3]
+                        else:
+                            size = 4
+                            mnem = parts[1]
+                            op = parts[2]
+
+                        inst = Inst(addr, addr, size, mnem, op)
                         
                         # 如果已经存在，更新信息
                         if addr in self.inst_dict:
                             # 更新已存在的临时指令
+                            self.inst_dict[addr].size = size
                             self.inst_dict[addr].mnem = mnem
                             self.inst_dict[addr].op = op
                         else:
